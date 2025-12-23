@@ -1,0 +1,16 @@
+{
+  "name": "odysee-channel-dl",
+  "version": "0.1.0",
+  "description": "Download videos from an Odysee channel using yt-dlp",
+  "main": "downloadChannel.js",
+  "scripts": {
+    "start": "node downloadChannel.js"
+  },
+  "author": "Justin Schwartzbeck (justinschw)",
+  "dependencies": {
+    "axios": "^1.13.2",
+    "cheerio": "^1.1.2",
+    "minimist": "^1.2.8",
+    "yt-dlp-wrap": "^2.3.12"
+  }
+}
