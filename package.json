@@ -1,6 +1,6 @@
 {
   "name": "odysee-channel-dl",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Download videos from an Odysee channel using yt-dlp",
   "main": "downloadChannel.js",
   "scripts": {
