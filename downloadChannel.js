@@ -13,14 +13,15 @@ const odysee = require('./lib/odysee');
 
 function parseArgs() {
   const argv = require('minimist')(process.argv.slice(2), {
-    string: ['channel-name', 'output-dir', 'oldest-date', 'page-size', 'ytdlp-path', 'ffmpeg-path'],
+    string: ['channel-name', 'output-dir', 'oldest-date', 'page-size', 'ytdlp-path', 'ffmpeg-path', 'podcast-url-prefix'],
     alias: {
       'channel-name': 'channelName',
       'output-dir': 'outputDir',
       'oldest-date': 'oldestDate',
       'page-size': 'pageSize',
       'ytdlp-path': 'ytdlpPath',
-      'ffmpeg-path': 'ffmpegPath'
+      'ffmpeg-path': 'ffmpegPath',
+      'podcast-url-prefix': 'podcastUrlPrefix'
     },
     default: {}
   });
@@ -34,6 +35,10 @@ function parseArgs() {
   const audioOnly = argv['audio-only'] || env.AUDIO_ONLY || false;
   const ytdlpPath = argv['ytdlp-path'] || env.YTDLP_PATH || argv.ytdlpPath || null;
   const ffmpegPath = argv['ffmpeg-path'] || env.FFMPEG_PATH || argv.ffmpegPath || null;
+  const rss = argv['rss'] || env.RSS || false;
+  const rssPath = argv['rss-path'] || env.RSS_PATH || argv.rssPath || null;
+  const podcastTitle = argv['podcast-title'] || env.PODCAST_TITLE || argv.podcastTitle || null;
+  const podcastUrlPrefix = argv['podcast-url-prefix'] || env.PODCAST_URL_PREFIX || argv.podcastUrlPrefix || null;
 
   if (!channelName) {
     throw new Error('channelName is required (env: CHANNEL_NAME or --channel-name)');
@@ -61,7 +66,7 @@ function parseArgs() {
     }
   }
 
-  return { channelName, outputDir, oldestDate, pageSize, audioOnly: !!audioOnly, ytdlpPath, ffmpegPath };
+  return { channelName, outputDir, oldestDate, pageSize, audioOnly: !!audioOnly, ytdlpPath, ffmpegPath, rss: !!rss, rssPath, podcastTitle, podcastUrlPrefix };
 }
 
 function ensureDir(dir) {
@@ -126,11 +131,15 @@ async function downloadToFile(url, filepath, audioOnly, ytdlpPath, ffmpegPath) {
   });
 }
 
-async function processChannel({ channelName, outputDir, oldestDate, pageSize, audioOnly, ytdlpPath, ffmpegPath }) {
+async function processChannel({ channelName, outputDir, oldestDate, pageSize, audioOnly, ytdlpPath, ffmpegPath, rss, rssPath, podcastTitle, podcastUrlPrefix }) {
   ensureDir(outputDir);
+  
+  // Collect metadata for RSS generation
+  const rssItems = [];
 
   let page = 1;
-  while (true) {
+  let processing = true;
+  while (processing) {
     console.log(`Fetching page ${page} (pageSize=${pageSize})`);
     let items;
     try {
@@ -150,7 +159,8 @@ async function processChannel({ channelName, outputDir, oldestDate, pageSize, au
       const created = item.date ? new Date(item.date * 1000) : null; // original code returns timestamp in seconds
       if (oldestDate && created && created < oldestDate) {
         console.log(`Reached oldestDate cutoff at ${item.title} (${created.toISOString()}). Stopping.`);
-        return;
+        processing = false;
+        break;
       }
 
       const safeTitle = filenameSafe(item.title || 'untitled');
@@ -162,6 +172,15 @@ async function processChannel({ channelName, outputDir, oldestDate, pageSize, au
       }
       if (fs.existsSync(outPath)) {
         console.log(`Skipping ${item.title} — already exists.`);
+        if (rss) {
+          rssItems.push({
+            title: item.title,
+            file: outPath,
+            url: `${podcastUrlPrefix}/${path.basename(outPath)}`,
+            date: created,
+            description: item.title
+          });
+        }
         continue;
       }
 
@@ -184,11 +203,22 @@ async function processChannel({ channelName, outputDir, oldestDate, pageSize, au
         console.log(`Downloading ${item.title} -> ${outPath}`);
         await downloadToFile(downloadUrl, outPath, audioOnly, ytdlpPath, ffmpegPath);
         console.log(`Downloaded ${item.title}`);
+        // collect metadata
+        if (rss) {
+          rssItems.push({
+            title: item.title,
+            file: outPath,
+            url: `${podcastUrlPrefix}/${path.basename(outPath)}`,
+            date: created,
+            description: item.title
+          });
+        }
       } catch (err) {
         console.error(`Failed to download ${item.title}:`, err.message || err);
         // remove partial file
         try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch {}
       }
+
     }
 
     if (items.length < pageSize) {
@@ -197,6 +227,37 @@ async function processChannel({ channelName, outputDir, oldestDate, pageSize, au
     }
     page += 1;
   }
+
+  // After processing pages, optionally write RSS
+  if (rss) {
+    const feedFile = rssPath || path.join(outputDir, 'feed.xml');
+    const feedTitle = podcastTitle || channelName;
+    generateRss(feedTitle, rssItems.sort((a,b) => (b.date||0) - (a.date||0)), feedFile);
+  }
+}
+
+function isoDate(d) {
+  if (!d) return new Date().toUTCString();
+  return new Date(d).toUTCString();
+}
+
+function generateRss(feedTitle, items, rssFilePath) {
+  // Simple RSS 2.0 generation
+  const buildItem = (it) => {
+    let enclosureUrl;
+    // Guess mime type by extension
+    const ext = path.extname(it.file || '').toLowerCase();
+    const mime = ext === '.mp4' ? 'video/mp4' : (ext === '.m4a' || ext === '.mp3' ? 'audio/mpeg' : 'application/octet-stream');
+    return `  <item>\n    <title>${escapeXml(it.title)}</title>\n    <description>${escapeXml(it.description || '')}</description>\n    <pubDate>${isoDate(it.date)}</pubDate>\n    <enclosure url="${escapeXml(it.url)}" type="${mime}"/>\n  </item>`;
+  };
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0">\n<channel>\n  <title>${escapeXml(feedTitle)}</title>\n${items.map(buildItem).join('\n')}\n</channel>\n</rss>`;
+  fs.writeFileSync(rssFilePath, xml, 'utf8');
+  console.log(`RSS written to ${rssFilePath}`);
+}
+
+function escapeXml(str) {
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
 
 async function main() {
