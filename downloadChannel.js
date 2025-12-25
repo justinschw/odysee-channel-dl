@@ -136,6 +136,25 @@ async function processChannel({ channelName, outputDir, oldestDate, pageSize, au
   
   // Collect metadata for RSS generation
   const rssItems = [];
+  // Simple local JSON cache to avoid repeated API calls and populate rssItems
+  const cacheFile = path.join(outputDir, 'feed.json');
+  const knownUrls = new Set();
+  const knownBasenames = new Set();
+  if (rss && fs.existsSync(cacheFile)) {
+    try {
+      const json = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+      if (Array.isArray(json.items)) {
+        for (const it of json.items) {
+          rssItems.push(it);
+          if (it.sourceUrl) knownUrls.add(it.sourceUrl);
+          if (it.file) knownBasenames.add(path.basename(it.file));
+        }
+        console.log(`Loaded ${rssItems.length} items from cache ${cacheFile}`);
+      }
+    } catch (e) {
+      console.error('Failed to load rss cache:', e.message || e);
+    }
+  }
 
   let page = 1;
   let processing = true;
@@ -156,6 +175,18 @@ async function processChannel({ channelName, outputDir, oldestDate, pageSize, au
 
     for (const item of items) {
       // item: { title, date, url }
+      // After processing an item, if we detect the next items are already known via their source URL or filename
+      // we can stop early. We'll check the next items in the current page quickly (cheap) and break if any match known.
+      try {
+        const nextKnown = items.slice(items.indexOf(item) + 1).some(next => knownUrls.has(next.url) || knownBasenames.has(filenameSafe(next.title) + (audioOnly ? '.m4a' : '.mp4')));
+        if (nextKnown) {
+          console.log('Encountered an already-known episode in the upcoming items; stopping to avoid extra API calls.');
+          processing = false;
+        }
+      } catch (e) {
+        // noop
+      }
+      
       const created = item.date ? new Date(item.date * 1000) : null; // original code returns timestamp in seconds
       if (oldestDate && created && created < oldestDate) {
         console.log(`Reached oldestDate cutoff at ${item.title} (${created.toISOString()}). Stopping.`);
@@ -178,7 +209,8 @@ async function processChannel({ channelName, outputDir, oldestDate, pageSize, au
             file: outPath,
             url: `${podcastUrlPrefix}/${path.basename(outPath)}`,
             date: created,
-            description: item.title
+            description: item.title,
+            sourceUrl: item.url
           });
         }
         continue;
@@ -205,20 +237,23 @@ async function processChannel({ channelName, outputDir, oldestDate, pageSize, au
         console.log(`Downloaded ${item.title}`);
         // collect metadata
         if (rss) {
-          rssItems.push({
+          const newItem = {
             title: item.title,
             file: outPath,
             url: `${podcastUrlPrefix}/${path.basename(outPath)}`,
             date: created,
-            description: item.title
-          });
+            description: item.title,
+            sourceUrl: item.url
+          };
+          rssItems.push(newItem);
+          knownUrls.add(item.url);
+          knownBasenames.add(path.basename(outPath));
         }
       } catch (err) {
         console.error(`Failed to download ${item.title}:`, err.message || err);
         // remove partial file
         try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch {}
       }
-
     }
 
     if (items.length < pageSize) {
@@ -227,6 +262,9 @@ async function processChannel({ channelName, outputDir, oldestDate, pageSize, au
     }
     page += 1;
   }
+
+  // Save cache file
+  try { fs.writeFileSync(cacheFile, JSON.stringify({ items: rssItems }, null, 2), 'utf8'); } catch (e) {}
 
   // After processing pages, optionally write RSS
   if (rss) {

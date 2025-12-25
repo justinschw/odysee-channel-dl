@@ -32,7 +32,12 @@ ENV PAGE_SIZE="50"
 ENV AUDIO_ONLY="false"
 ENV FFMPEG_PATH="/usr/bin/ffmpeg"
 ENV YTDLP_PATH="/usr/local/bin/yt-dlp"
+ENV POLL_INTERVAL=""
 
 VOLUME ["/data"]
 
-CMD ["node", "downloadChannel.js"]
+# Copy and use a small runner script that optionally polls on an interval.
+COPY --chown=node:node run.sh /usr/local/bin/run.sh
+RUN chmod +x /usr/local/bin/run.sh
+
+ENTRYPOINT ["/usr/local/bin/run.sh"]
